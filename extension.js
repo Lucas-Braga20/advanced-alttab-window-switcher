@@ -5,10 +5,19 @@
  * @author     GdH <G-dH@github.com>
  * @copyright  2021-2024
  * @license    GPL-3.0
+ *
+ * This fork was made to fix a bug where scrolling in one application is repeated 
+ * in another when switching between them using Alt+Tab (e.g., VS Code and Chrome).
+ *
+ * This fix was taken from the gnome-shell-extension-alt-tab-scroll-workaround repository,
+ * whose original code is at: https://github.com/link-to-gnome-shell-extension-alt-tab-scroll- workaround-repository
+ *
+ * Thanks to the authors above for their contribution.
  */
 
 'use strict';
 
+import Clutter from "gi://Clutter";
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
@@ -17,6 +26,7 @@ import Gio from 'gi://Gio';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as AltTab from 'resource:///org/gnome/shell/ui/altTab.js';
+import * as Overview from "resource:///org/gnome/shell/ui/overview.js";
 import * as Layout from 'resource:///org/gnome/shell/ui/layout.js';
 
 import * as WindowSwitcherPopup from './src/windowSwitcherPopup.js';
@@ -26,7 +36,7 @@ import * as SwitcherList from './src/switcherList.js';
 import * as SwitcherItems from './src/switcherItems.js';
 import * as WindowMenu from './src/windowMenu.js';
 
-import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
+import { Extension, InjectionManager, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const HOT_CORNER_PRESSURE_TIMEOUT = 1000; // ms
 
@@ -43,7 +53,19 @@ export default class AATWS extends Extension {
         this._pressureBarriers = null;
     }
 
+    movePointer() {
+        const [x, y] = global.get_pointer();
+        this.vdevice.notify_absolute_motion(global.get_current_time(), x, y);
+    }
+
     enable() {
+        this._injectionManager = new InjectionManager();
+
+        const seat = Clutter.get_default_backend().get_default_seat();
+        this.vdevice = seat.create_virtual_device(
+            Clutter.InputDeviceType.POINTER_DEVICE
+        );
+
         const Me = {
             metadata: this.metadata,
             gSettings: this.getSettings(),
@@ -64,6 +86,60 @@ export default class AATWS extends Extension {
         // AppSwitcherPopup is handled by the WindowSwitcherPopup
         this._overrides.addOverride('AppSwitcherPopup', AltTab.AppSwitcherPopup.prototype, WindowSwitcherPopup.WindowSwitcherPopup);
         this._overrides.addOverride('AppSwitcherPopupInit', AltTab.AppSwitcherPopup.prototype, WindowSwitcherPopup.AppSwitcherPopup);
+
+        // Fix for Alt+Tab (switch windows)
+        this._injectionManager.overrideMethod(
+            AltTab.WindowSwitcherPopup.prototype,
+            "_finish",
+            (originalMethod) => {
+                let that = this;
+                return function () {
+                    that.movePointer();
+                    originalMethod.call(this);
+                };
+            }
+        );
+
+        // Fix for Super+Tab (switch applications)
+        this._injectionManager.overrideMethod(
+            AltTab.AppSwitcherPopup.prototype,
+            "_finish",
+            (originalMethod) => {
+                let that = this;
+                return function (timestamp) {
+                    if (this._currentWindow < 0) {
+                        that.movePointer();
+                    }
+                    originalMethod.call(this, timestamp);
+                };
+            }
+        );
+
+        // Fix for Alt+Escape (switch windows directly)
+        this._injectionManager.overrideMethod(
+            AltTab.WindowCyclerPopup.prototype,
+            "_finish",
+            (originalMethod) => {
+                let that = this;
+                return function () {
+                    that.movePointer();
+                    originalMethod.call(this);
+                };
+            }
+        );
+
+        // Fix for overview (hot corner or Super key) + mouse click
+        this._injectionManager.overrideMethod(
+            Overview.Overview.prototype,
+            '_showDone',
+            (originalMethod) => {
+                let that = this;
+                return function () {
+                    that.movePointer();
+                    originalMethod.call(this);
+                };
+            }
+        );
 
         if (this._opt.get('superKeyMode') > 1)
             this._updateOverlayKeyHandler();
@@ -102,6 +178,10 @@ export default class AATWS extends Extension {
         this._opt.destroy();
         this._opt = null;
         this.Me = null;
+
+        this._injectionManager.clear();
+        this._injectionManager = null;
+        this.vdevice = null;
 
         console.debug(`${this.metadata.name}: enabled`);
     }

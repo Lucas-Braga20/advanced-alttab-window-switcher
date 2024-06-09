@@ -770,7 +770,7 @@ export default class AATWS extends ExtensionPreferences {
 
         const popupSizeAdjustment = new Gtk.Adjustment({
             upper: 512,
-            lower: 32,
+            lower: 0,
             step_increment: 8,
             page_increment: 32,
         });
